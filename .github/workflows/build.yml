@@ -1,0 +1,144 @@
+name: Build TB-J606F ReSukiSU Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: '内核源码分支'
+        required: false
+        default: 'lineage-19.1'
+      root_branch:
+        description: 'ReSukiSU 分支（留空用最新 tag）'
+        required: false
+        default: 'main'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    steps:
+      - name: 检出本工程（workflow 用）
+        uses: actions/checkout@v4
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git bc bison flex libssl-dev make \
+            gcc-aarch64-linux-gnu build-essential python3 rsync curl \
+            unzip libelf-dev dwarves ccache
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+
+      - name: 拉取内核源码 (${{ github.event.inputs.kernel_branch }})
+        run: |
+          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" \
+            https://github.com/adazem009/kernel_lenovo_tbj606.git kernel
+          cd kernel
+          echo "内核版本: $(make kernelversion 2>/dev/null || echo unknown)"
+          echo "存在 TBJ606_defconfig: $(test -f arch/arm64/configs/vendor/TBJ606_defconfig && echo yes || echo no)"
+
+      - name: 集成 ReSukiSU
+        run: |
+          cd kernel
+          curl -fsSL "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" -o /tmp/rksu.sh
+          if [ ! -s /tmp/rksu.sh ]; then
+            echo "::error::ReSukiSU setup.sh 下载失败，终止"; exit 1
+          fi
+          bash /tmp/rksu.sh "${{ github.event.inputs.root_branch }}"
+          echo "--- drivers/Makefile 中 KSU 行 ---"
+          grep -n "kernelsu" drivers/Makefile || true
+
+      - name: 生成设备 defconfig（基于源码自带 TBJ606_defconfig）
+        run: |
+          cd kernel
+          SRC=arch/arm64/configs/vendor/TBJ606_defconfig
+          if [ ! -f "$SRC" ]; then
+            echo "::error::源码里找不到 $SRC，可能分支不对"; exit 1
+          fi
+          cp "$SRC" arch/arm64/configs/tbj606f_defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- tbj606f_defconfig
+          # 解析新符号，避免编译时卡在询问
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+
+      - name: 开启 Root 必需选项（逐项存在才改，不存在跳过）
+        run: |
+          cd kernel
+          D=arch/arm64/configs/tbj606f_defconfig
+          enable() { scripts/config --file "$D" -e "$1" 2>/dev/null || true; }
+          disable() { scripts/config --file "$D" -d "$1" 2>/dev/null || true; }
+          # Root 基础
+          enable CONFIG_KALLSYMS
+          enable CONFIG_KALLSYMS_ALL
+          enable CONFIG_KALLSYMS_BASE_RELATIVE
+          enable CONFIG_MODULES
+          # ReSukiSU / KernelSU（非 GKI 走 manual hook）
+          enable CONFIG_KSU
+          enable CONFIG_KSU_MANUAL_HOOK
+          enable CONFIG_KPM
+          enable CONFIG_SUSFS
+          # 关掉强制模块签名，避免自编译模块被拒
+          disable CONFIG_MODULE_SIG_FORCE
+          disable CONFIG_MODULE_SIG_ALL
+          disable CONFIG_MODULE_SIG
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          echo "=== 关键项 ==="
+          grep -E "CONFIG_KSU|CONFIG_KPM|CONFIG_SUSFS|CONFIG_KALLSYMS_ALL|CONFIG_MODULE_SIG_FORCE" "$D" || true
+
+      - name: 编译内核（目标自动探测）
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export KBUILD_BUILD_USER=tbj606f
+          export KBUILD_BUILD_HOST=reSukiSU
+          # 先试带 dtb 的目标，失败再退回裸 Image
+          if make -j$(nproc) Image.gz-dtb 2>&1 | tail -40; then
+            echo "[+] Image.gz-dtb 构建完成"
+          else
+            echo "[!] Image.gz-dtb 失败，退回 Image + dtbs"
+            make -j$(nproc) Image dtbs 2>&1 | tail -40
+          fi
+          echo "=== boot 目录产物 ==="
+          ls -la arch/arm64/boot/ || true
+
+      - name: 定位内核镜像
+        id: locate
+        run: |
+          cd kernel/arch/arm64/boot
+          IMG=""
+          for f in Image.gz-dtb Image.lz4-dtb Image-dtb Image.gz Image.lz4 Image; do
+            if [ -f "$f" ]; then IMG="$f"; break; fi
+          done
+          if [ -z "$IMG" ]; then echo "::error::没有生成任何内核镜像"; exit 1; fi
+          echo "选中的镜像: $IMG"
+          echo "img=$IMG" >> "$GITHUB_OUTPUT"
+          cp "$IMG" "$RUNNER_TEMP/Image_final"
+          ls -la "$RUNNER_TEMP/Image_final"
+
+      - name: 打包 AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          rm -rf ak3/.git
+          cp "$RUNNER_TEMP/Image_final" ak3/Image.gz-dtb
+          cp "$GITHUB_WORKSPACE/configs/anykernel.sh" ak3/anykernel.sh
+          cd ak3 && zip -r9 ../AnyKernel3-ReSukiSU-tbj606f.zip . -x '*.git*' 'README.md'
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3-ReSukiSU-tbj606f
+          path: |
+            AnyKernel3-ReSukiSU-tbj606f.zip
+            kernel/arch/arm64/boot/Image*
+          retention-days: 30
+
+      - name: 输出摘要
+        run: |
+          echo "### TB-J606F ReSukiSU 编译完成" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- 内核分支: ${{ github.event.inputs.kernel_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ReSukiSU 分支: ${{ github.event.inputs.root_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 内核镜像: ${{ steps.locate.outputs.img }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 产物: AnyKernel3-ReSukiSU-tbj606f.zip" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**AK3 zip 不能直接 \`fastboot boot\`（缺 ramdisk）。正确验证见 README：先用 TWRP 备份原厂 boot 两槽，再拿备份 ramdisk 拼测试 boot.img 用 \`fastboot boot\` 试，能进系统才 flash。**" >> $GITHUB_STEP_SUMMARY
