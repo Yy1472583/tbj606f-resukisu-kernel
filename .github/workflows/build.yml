@@ -89,6 +89,11 @@ jobs:
           enable CONFIG_KSU
           disable CONFIG_KSU_TRACEPOINT_HOOK
           enable CONFIG_KSU_MANUAL_HOOK
+          # 让 LSM 钩子自动接管 setuid / initrc / input，
+          # 省掉 kernel/sys.c、fs/read_write.c、drivers/input/input.c 三处手工补丁
+          enable CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
+          enable CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+          enable CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
           enable CONFIG_KPM
           enable CONFIG_SUSFS
           # 关掉强制模块签名，避免自编译模块被拒
@@ -118,6 +123,13 @@ jobs:
             exit 1
           fi
           echo "[+] hook 配置正确：MANUAL_HOOK=y / TRACEPOINT_HOOK=off"
+
+      - name: 应用 ReSukiSU 非 GKI manual hook 源码补丁
+        run: |
+          cd kernel
+          echo "=== 三个 AUTO_* 是否生效（生效就不用改另外三个文件）==="
+          grep -E "^CONFIG_KSU_MANUAL_HOOK_AUTO_(SETUID|INITRC|INPUT)_HOOK=" .config || true
+          python3 "${{ github.workspace }}/configs/apply_manual_hook.py" .
 
       - name: 编译内核（完整日志 + 修 -fno-common）
         run: |
