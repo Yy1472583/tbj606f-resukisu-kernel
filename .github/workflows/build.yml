@@ -90,32 +90,60 @@ jobs:
           echo "=== 关键项 ==="
           grep -E "CONFIG_KSU|CONFIG_KPM|CONFIG_SUSFS|CONFIG_KALLSYMS_ALL|CONFIG_MODULE_SIG_FORCE" "$D" || true
 
-      - name: 编译内核（目标自动探测）
+      - name: 编译内核（完整日志 + 修 -fno-common）
         run: |
           cd kernel
+          set -o pipefail
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export KBUILD_BUILD_USER=tbj606f
           export KBUILD_BUILD_HOST=reSukiSU
-          # 先试带 dtb 的目标，失败再退回裸 Image
-          if make -j$(nproc) Image.gz-dtb 2>&1 | tail -40; then
+          # GCC10+ 默认 -fno-common，老内核(KernelSU/ReSukiSU 补丁)常触发 multiple definition 链接失败
+          export KCFLAGS="-fcommon"
+          export HOSTCFLAGS="-fcommon"
+          export KCPPFLAGS="-fcommon"
+          LOG="$RUNNER_TEMP/build.log"
+          if make -j"$(nproc)" Image.gz-dtb 2>&1 | tee "$LOG"; then
             echo "[+] Image.gz-dtb 构建完成"
           else
-            echo "[!] Image.gz-dtb 失败，退回 Image + dtbs"
-            make -j$(nproc) Image dtbs 2>&1 | tail -40
+            echo "::error::make Image.gz-dtb 失败，关键错误如下："
+            grep -iE "error:|multiple definition|undefined reference|No rule to make|recipe for target|Stop\.|fatal error" "$LOG" | tail -40
+            echo "[*] 退回 Image + dtbs"
+            make -j"$(nproc)" Image dtbs 2>&1 | tee -a "$LOG"
           fi
           echo "=== boot 目录产物 ==="
           ls -la arch/arm64/boot/ || true
+          echo "=== 生成的 dtb ==="
+          find arch/arm64/boot/dts -name '*.dtb' 2>/dev/null | head -20 || true
 
-      - name: 定位内核镜像
+      - name: 组装 Image.gz-dtb（必要时手动追加 dtb）
         id: locate
         run: |
           cd kernel/arch/arm64/boot
           IMG=""
-          for f in Image.gz-dtb Image.lz4-dtb Image-dtb Image.gz Image.lz4 Image; do
+          for f in Image.gz-dtb Image.lz4-dtb Image-dtb; do
             if [ -f "$f" ]; then IMG="$f"; break; fi
           done
-          if [ -z "$IMG" ]; then echo "::error::没有生成任何内核镜像"; exit 1; fi
+          if [ -z "$IMG" ]; then
+            # 没有现成的 appended-dtb 镜像，尝试手动拼
+            KERNEL=""
+            for f in Image.gz Image.lz4 Image; do
+              if [ -f "$f" ]; then KERNEL="$f"; break; fi
+            done
+            if [ -z "$KERNEL" ]; then
+              echo "::error::连裸 Image 都没生成，编译实际失败（完整日志见 build.log 产物）"; exit 1
+            fi
+            if [ "$KERNEL" = "Image" ]; then gzip -kf Image && KERNEL=Image.gz; fi
+            DTB=$(find "$PWD/../dts" -name '*.dtb' 2>/dev/null | grep -iE "tbj606|j606|m11" | head -1)
+            [ -z "$DTB" ] && DTB=$(find "$PWD/../dts" -name '*.dtb' 2>/dev/null | head -1)
+            if [ -z "$DTB" ]; then
+              echo "::error::找不到任何 .dtb，无法组装"; exit 1
+            fi
+            echo "[*] 用 $KERNEL + $DTB 组装 Image.gz-dtb"
+            cp "$KERNEL" Image.gz-dtb
+            cat "$DTB" >> Image.gz-dtb
+            IMG=Image.gz-dtb
+          fi
           echo "选中的镜像: $IMG"
           echo "img=$IMG" >> "$GITHUB_OUTPUT"
           cp "$IMG" "$RUNNER_TEMP/Image_final"
@@ -136,6 +164,7 @@ jobs:
           path: |
             AnyKernel3-ReSukiSU-tbj606f.zip
             kernel/arch/arm64/boot/Image*
+            ${{ runner.temp }}/build.log
           retention-days: 30
 
       - name: 输出摘要
