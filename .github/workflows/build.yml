@@ -1,6 +1,8 @@
 name: Build TB-J606F ReSukiSU Kernel
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       kernel_branch:
