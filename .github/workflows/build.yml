@@ -33,7 +33,7 @@ jobs:
 
       - name: 拉取内核源码 (${{ github.event.inputs.kernel_branch }})
         run: |
-          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" \
+          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch || 'lineage-19.1' }}" \
             https://github.com/adazem009/kernel_lenovo_tbj606.git kernel
           cd kernel
           echo "内核版本: $(make kernelversion 2>/dev/null || echo unknown)"
@@ -46,7 +46,7 @@ jobs:
           if [ ! -s /tmp/rksu.sh ]; then
             echo "::error::ReSukiSU setup.sh 下载失败，终止"; exit 1
           fi
-          bash /tmp/rksu.sh "${{ github.event.inputs.root_branch }}"
+          bash /tmp/rksu.sh "${{ github.event.inputs.root_branch || 'main' }}"
           echo "--- drivers/Makefile 中 KSU 行 ---"
           grep -n "kernelsu" drivers/Makefile || true
 
@@ -138,8 +138,8 @@ jobs:
         run: |
           echo "### TB-J606F ReSukiSU 编译完成" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- 内核分支: ${{ github.event.inputs.kernel_branch }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ReSukiSU 分支: ${{ github.event.inputs.root_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 内核分支: ${{ github.event.inputs.kernel_branch || 'lineage-19.1' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ReSukiSU 分支: ${{ github.event.inputs.root_branch || 'main' }}" >> $GITHUB_STEP_SUMMARY
           echo "- 内核镜像: ${{ steps.locate.outputs.img }}" >> $GITHUB_STEP_SUMMARY
           echo "- 产物: AnyKernel3-ReSukiSU-tbj606f.zip" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
