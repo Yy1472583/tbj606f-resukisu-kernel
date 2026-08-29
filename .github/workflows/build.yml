@@ -141,14 +141,21 @@ jobs:
           export KBUILD_BUILD_HOST=reSukiSU
           # 1) GCC10+ 默认 -fno-common，老内核(KernelSU/ReSukiSU 补丁)常触发 multiple definition 链接失败
           # 2) 老 vendor 代码在 GCC11 下大量 maybe-uninitialized 被 -Werror 抬成错误，降级为普通告警
-          KC_BASE="-fcommon -Wno-error -Wno-maybe-uninitialized -Wno-error=maybe-uninitialized"
-          # 3) techpack 的头文件大量依赖各自目录的 -I（如 techpack/display/pll/pll_trace.h、
-          #    techpack/camera/drivers/cam_req_mgr/cam_req_mgr_core.h）。
+          # 注意：GCC 里【通用 -Wno-error 盖不住具体的 -Werror=X】，
+          # 必须逐个点名 -Wno-error=X 或 -Wno-X，否则照样报错。
+          KC_BASE="-fcommon -Wno-error"
+          KC_BASE="$KC_BASE -Wno-maybe-uninitialized -Wno-error=maybe-uninitialized"
+          KC_BASE="$KC_BASE -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration"
+          KC_BASE="$KC_BASE -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
+          KC_BASE="$KC_BASE -Wno-error=return-type -Wno-error=address-of-packed-member"
+          # 3) vendor 代码的头文件大量依赖各自目录的 -I（如 techpack/display/pll/pll_trace.h、
+          #    techpack/camera/drivers/cam_req_mgr/cam_req_mgr_core.h、
+          #    drivers/usb/fusb302b 的 core_* 声明）。
           #    这些 -I 在 AOSP/LineageOS 的 build.config 里由设备 BoardConfig 提供，
           #    裸 make 拿不到 -> fatal error: No such file or directory。
-          #    这里把 techpack 下所有含 .h 的目录全部注入 -I，一次性覆盖。
+          #    这里把相关目录下所有含 .h 的目录全部注入 -I，一次性覆盖。
           export INCS
-          INCS=$(find techpack -name '*.h' -printf '%h\n' 2>/dev/null | sort -u | sed "s|^|-I$(pwd)/|" | tr '\n' ' ')
+          INCS=$(find techpack drivers/usb/fusb302b -name '*.h' -printf '%h\n' 2>/dev/null | sort -u | sed "s|^|-I$(pwd)/|" | tr '\n' ' ')
           echo "注入 -I 目录数: $(echo "$INCS" | wc -w)"
           export KCFLAGS="$KC_BASE $INCS"
           export HOSTCFLAGS="-fcommon -Wno-error"
