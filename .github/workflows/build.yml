@@ -77,8 +77,12 @@ jobs:
           enable CONFIG_KALLSYMS_ALL
           enable CONFIG_KALLSYMS_BASE_RELATIVE
           enable CONFIG_MODULES
-          # ReSukiSU / KernelSU（非 GKI 走 manual hook）
+          # ReSukiSU / KernelSU
+          # Kbuild 判定顺序是 if/else 链：TRACEPOINT_HOOK -> MANUAL_HOOK -> SUSFS
+          # TRACEPOINT_HOOK 在 Kconfig 里默认 =y，且只对 GKI 2.0 有效，
+          # 非 GKI 一旦命中就直接 $(error)，必须先关掉才会落到 MANUAL_HOOK。
           enable CONFIG_KSU
+          disable CONFIG_KSU_TRACEPOINT_HOOK
           enable CONFIG_KSU_MANUAL_HOOK
           enable CONFIG_KPM
           enable CONFIG_SUSFS
@@ -87,8 +91,10 @@ jobs:
           disable CONFIG_MODULE_SIG_ALL
           disable CONFIG_MODULE_SIG
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          echo "=== 关键项 ==="
-          grep -E "CONFIG_KSU|CONFIG_KPM|CONFIG_SUSFS|CONFIG_KALLSYMS_ALL|CONFIG_MODULE_SIG_FORCE" "$D" || true
+          echo "=== 关键项（最终 .config）==="
+          grep -E "CONFIG_KSU|CONFIG_KPM|CONFIG_SUSFS|CONFIG_KALLSYMS_ALL|CONFIG_MODULE_SIG_FORCE" .config || true
+          echo "=== hook 方式校验（必须只剩 MANUAL_HOOK=y）==="
+          grep -E "^CONFIG_KSU_(TRACEPOINT_HOOK|MANUAL_HOOK|SUSFS)=" .config || echo "（警告：三个 hook 符号一个都没开！）"
 
       - name: 编译内核（完整日志 + 修 -fno-common）
         run: |
@@ -98,9 +104,19 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export KBUILD_BUILD_USER=tbj606f
           export KBUILD_BUILD_HOST=reSukiSU
-          # GCC10+ 默认 -fno-common，老内核(KernelSU/ReSukiSU 补丁)常触发 multiple definition 链接失败
-          export KCFLAGS="-fcommon"
-          export HOSTCFLAGS="-fcommon"
+          # 1) GCC10+ 默认 -fno-common，老内核(KernelSU/ReSukiSU 补丁)常触发 multiple definition 链接失败
+          # 2) 老 vendor 代码在 GCC11 下大量 maybe-uninitialized 被 -Werror 抬成错误，降级为普通告警
+          KC_BASE="-fcommon -Wno-error -Wno-maybe-uninitialized -Wno-error=maybe-uninitialized"
+          # 3) techpack 的头文件大量依赖各自目录的 -I（如 techpack/display/pll/pll_trace.h、
+          #    techpack/camera/drivers/cam_req_mgr/cam_req_mgr_core.h）。
+          #    这些 -I 在 AOSP/LineageOS 的 build.config 里由设备 BoardConfig 提供，
+          #    裸 make 拿不到 -> fatal error: No such file or directory。
+          #    这里把 techpack 下所有含 .h 的目录全部注入 -I，一次性覆盖。
+          export INCS
+          INCS=$(find techpack -name '*.h' -printf '%h\n' 2>/dev/null | sort -u | sed "s|^|-I$(pwd)/|" | tr '\n' ' ')
+          echo "注入 -I 目录数: $(echo "$INCS" | wc -w)"
+          export KCFLAGS="$KC_BASE $INCS"
+          export HOSTCFLAGS="-fcommon -Wno-error"
           export KCPPFLAGS="-fcommon"
           LOG="$RUNNER_TEMP/build.log"
           if make -j"$(nproc)" Image.gz-dtb 2>&1 | tee "$LOG"; then
