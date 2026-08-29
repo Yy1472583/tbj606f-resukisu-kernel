@@ -50,6 +50,10 @@ jobs:
           echo "--- drivers/Makefile 中 KSU 行 ---"
           grep -n "kernelsu" drivers/Makefile || true
 
+      - name: 修复 Python2 编译包装脚本（gcc-wrapper.py）
+        run: |
+          bash configs/fix-gcc-wrapper.sh kernel
+
       - name: 生成设备 defconfig（基于源码自带 TBJ606_defconfig）
         run: |
           cd kernel
