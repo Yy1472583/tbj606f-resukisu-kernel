@@ -150,24 +150,31 @@ jobs:
           KC_BASE="$KC_BASE -Wno-error=return-type -Wno-error=address-of-packed-member"
           # 3) vendor 代码的头文件大量依赖各自目录的 -I（如 techpack/display/pll/pll_trace.h、
           #    techpack/camera/drivers/cam_req_mgr/cam_req_mgr_core.h、
-          #    drivers/usb/fusb302b 的 core_* 声明）。
+          #    drivers/usb/fusb302b 的 core_* 声明、
+          #    drivers/usb/typec/tcpc 的 inc/tcpci.h）。
           #    这些 -I 在 AOSP/LineageOS 的 build.config 里由设备 BoardConfig 提供，
           #    裸 make 拿不到 -> fatal error: No such file or directory。
-          #    这里把相关目录下所有含 .h 的目录全部注入 -I，一次性覆盖。
+          #    这里一次性覆盖：(a) 相关目录下所有含 .h 的目录；
+          #    (b) drivers/ 下凡是带 inc/ 或 include/ 子目录的，其【父目录】也要 -I
+          #        （vendor 驱动习惯按自己根目录写 #include "inc/xxx.h"）。
           export INCS
-          INCS=$(find techpack drivers/usb/fusb302b -name '*.h' -printf '%h\n' 2>/dev/null | sort -u | sed "s|^|-I$(pwd)/|" | tr '\n' ' ')
+          INCS=$(find techpack drivers/usb -name '*.h' -printf '%h\n' 2>/dev/null | sort -u | sed "s|^|-I$(pwd)/|" | tr '\n' ' ')
+          EXTRA=$(find drivers -type d \( -name inc -o -name include \) -printf '%h\n' 2>/dev/null | sort -u | sed "s|^|-I$(pwd)/|" | tr '\n' ' ')
+          INCS="$INCS $EXTRA"
           echo "注入 -I 目录数: $(echo "$INCS" | wc -w)"
           export KCFLAGS="$KC_BASE $INCS"
           export HOSTCFLAGS="-fcommon -Wno-error"
           export KCPPFLAGS="-fcommon"
           LOG="$RUNNER_TEMP/build.log"
-          if make -j"$(nproc)" Image.gz-dtb 2>&1 | tee "$LOG"; then
+          # -k: 出错不立刻停，继续编完其余目标，一次把【所有】错误都暴露出来。
+          # 否则每修一个错误就要空跑一轮 20 分钟，太浪费。
+          if make -k -j"$(nproc)" Image.gz-dtb 2>&1 | tee "$LOG"; then
             echo "[+] Image.gz-dtb 构建完成"
           else
-            echo "::error::make Image.gz-dtb 失败，关键错误如下："
-            grep -iE "error:|multiple definition|undefined reference|No rule to make|recipe for target|Stop\.|fatal error" "$LOG" | tail -40
+            echo "::error::make Image.gz-dtb 失败，全部关键错误如下："
+            grep -iE "error:|multiple definition|undefined reference|No rule to make|recipe for target|Stop\.|fatal error" "$LOG" | sort -u | head -60
             echo "[*] 退回 Image + dtbs"
-            make -j"$(nproc)" Image dtbs 2>&1 | tee -a "$LOG"
+            make -k -j"$(nproc)" Image dtbs 2>&1 | tee -a "$LOG"
           fi
           echo "=== boot 目录产物 ==="
           ls -la arch/arm64/boot/ || true
