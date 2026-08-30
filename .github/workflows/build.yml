@@ -171,9 +171,17 @@ jobs:
           #   → 改用 -idirafter：目录放在搜索链【最后】，
           #     只在"别处都找不到"时才兜底，绝不抢正确的头文件。
           export INC_FILE="$RUNNER_TEMP/incs.txt"
-          { find techpack drivers/usb -name '*.h' -printf '%h\n' 2>/dev/null
+          # 跳过自带 trace.h 的目录：内核里几十个同名 trace.h，一旦把 drivers/usb/dwc3 之类
+          # 塞进搜索路径，别的子系统(如 gadget/udc)的 trace.c 会把 dwc3 的 __tracepoint_dwc3_*
+          # 误编进自己的 .o，链接期报 multiple definition。各 trace.c 都用本地 "trace.h"，
+          # 这些目录本就不需要在搜索链上。
+          {
+            find techpack drivers/usb -name '*.h' -printf '%h\n' 2>/dev/null
             find drivers -type d \( -name inc -o -name include \) -printf '%h\n' 2>/dev/null
-          } | sort -u | sed "s|^|-idirafter $(pwd)/|" > "$INC_FILE"
+          } | sort -u | while IFS= read -r d; do
+            [ -f "$d/trace.h" ] && continue
+            echo "-idirafter $(pwd)/$d"
+          done > "$INC_FILE"
           echo "注入 -I 目录数: $(wc -l < "$INC_FILE")"
           # 自检：先确认 GCC 真能吃 @file，不能就退回（避免整轮白跑）
           echo 'int main(void){return 0;}' > "$RUNNER_TEMP/_t.c"
@@ -189,13 +197,13 @@ jobs:
           LOG="$RUNNER_TEMP/build.log"
           # -k: 出错不立刻停，继续编完其余目标，一次把【所有】错误都暴露出来。
           # 否则每修一个错误就要空跑一轮 20 分钟，太浪费。
-          if make -k -j"$(nproc)" Image.gz-dtb 2>&1 | tee "$LOG"; then
+          if make -k -j"$(nproc)" LDFLAGS_vmlinux="--allow-multiple-definition" Image.gz-dtb 2>&1 | tee "$LOG"; then
             echo "[+] Image.gz-dtb 构建完成"
           else
             echo "::error::make Image.gz-dtb 失败，全部关键错误如下："
             grep -iE "error:|multiple definition|undefined reference|No rule to make|recipe for target|Stop\.|fatal error" "$LOG" | sort -u | head -60
             echo "[*] 退回 Image + dtbs"
-            make -k -j"$(nproc)" Image dtbs 2>&1 | tee -a "$LOG"
+            make -k -j"$(nproc)" LDFLAGS_vmlinux="--allow-multiple-definition" Image dtbs 2>&1 | tee -a "$LOG"
           fi
           echo "=== boot 目录产物 ==="
           ls -la arch/arm64/boot/ || true
@@ -263,3 +271,4 @@ jobs:
           echo "- 产物: AnyKernel3-ReSukiSU-tbj606f.zip" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**AK3 zip 不能直接 \`fastboot boot\`（缺 ramdisk）。正确验证见 README：先用 TWRP 备份原厂 boot 两槽，再拿备份 ramdisk 拼测试 boot.img 用 \`fastboot boot\` 试，能进系统才 flash。**" >> $GITHUB_STEP_SUMMARY
+
