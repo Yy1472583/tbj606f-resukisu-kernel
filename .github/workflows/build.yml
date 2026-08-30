@@ -160,14 +160,20 @@ jobs:
           #    这里一次性覆盖：(a) 相关目录下所有含 .h 的目录；
           #    (b) drivers/ 下凡是带 inc/ 或 include/ 子目录的，其【父目录】也要 -I
           #        （vendor 驱动习惯按自己根目录写 #include "inc/xxx.h"）。
-          # ⚠️ 教训：-I 条目太多会把命令行撑爆。
-          # 实测注入 290 条时 /bin/sh 报 "Argument list too long"，
-          # 导致 qcacld-3.0(WiFi) 与 techpack/audio 大面积 Error 127（命令根本没跑起来）。
-          # 改用 GCC 的 @file 机制：把 -I 列表写进文件，命令行只留一个 @路径。
+          # ⚠️ 教训 1：-I 条目太多会把命令行撑爆。
+          #   实测 290 条时 /bin/sh 报 "Argument list too long"，
+          #   qcacld-3.0(WiFi) 与 techpack/audio 大面积 Error 127（命令压根没跑起来）。
+          #   → 用 GCC 的 @file 机制，把列表写进文件，命令行只留一个 @路径。
+          # ⚠️ 教训 2（更要命）：泛洪式 -I 会造成【头文件歧义】。
+          #   内核树里有几十个同名 trace.h，全塞进 -I 后，
+          #   drivers/base/regmap 竟然 include 到了 drivers/usb/dwc3/trace.h，
+          #   链接期报 "regmap.o 重复定义 __tracepoint_dwc3_*"。
+          #   → 改用 -idirafter：目录放在搜索链【最后】，
+          #     只在"别处都找不到"时才兜底，绝不抢正确的头文件。
           export INC_FILE="$RUNNER_TEMP/incs.txt"
           { find techpack drivers/usb -name '*.h' -printf '%h\n' 2>/dev/null
             find drivers -type d \( -name inc -o -name include \) -printf '%h\n' 2>/dev/null
-          } | sort -u | sed "s|^|-I$(pwd)/|" > "$INC_FILE"
+          } | sort -u | sed "s|^|-idirafter $(pwd)/|" > "$INC_FILE"
           echo "注入 -I 目录数: $(wc -l < "$INC_FILE")"
           # 自检：先确认 GCC 真能吃 @file，不能就退回（避免整轮白跑）
           echo 'int main(void){return 0;}' > "$RUNNER_TEMP/_t.c"
