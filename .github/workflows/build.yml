@@ -148,6 +148,9 @@ jobs:
           KC_BASE="$KC_BASE -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration"
           KC_BASE="$KC_BASE -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
           KC_BASE="$KC_BASE -Wno-error=return-type -Wno-error=address-of-packed-member"
+          KC_BASE="$KC_BASE -Wno-error=misleading-indentation -Wno-misleading-indentation"
+          KC_BASE="$KC_BASE -Wno-error=array-bounds -Wno-error=stringop-overflow"
+          KC_BASE="$KC_BASE -Wno-error=aggressive-loop-optimizations -Wno-error=unused-function"
           # 3) vendor 代码的头文件大量依赖各自目录的 -I（如 techpack/display/pll/pll_trace.h、
           #    techpack/camera/drivers/cam_req_mgr/cam_req_mgr_core.h、
           #    drivers/usb/fusb302b 的 core_* 声明、
@@ -157,12 +160,24 @@ jobs:
           #    这里一次性覆盖：(a) 相关目录下所有含 .h 的目录；
           #    (b) drivers/ 下凡是带 inc/ 或 include/ 子目录的，其【父目录】也要 -I
           #        （vendor 驱动习惯按自己根目录写 #include "inc/xxx.h"）。
-          export INCS
-          INCS=$(find techpack drivers/usb -name '*.h' -printf '%h\n' 2>/dev/null | sort -u | sed "s|^|-I$(pwd)/|" | tr '\n' ' ')
-          EXTRA=$(find drivers -type d \( -name inc -o -name include \) -printf '%h\n' 2>/dev/null | sort -u | sed "s|^|-I$(pwd)/|" | tr '\n' ' ')
-          INCS="$INCS $EXTRA"
-          echo "注入 -I 目录数: $(echo "$INCS" | wc -w)"
-          export KCFLAGS="$KC_BASE $INCS"
+          # ⚠️ 教训：-I 条目太多会把命令行撑爆。
+          # 实测注入 290 条时 /bin/sh 报 "Argument list too long"，
+          # 导致 qcacld-3.0(WiFi) 与 techpack/audio 大面积 Error 127（命令根本没跑起来）。
+          # 改用 GCC 的 @file 机制：把 -I 列表写进文件，命令行只留一个 @路径。
+          export INC_FILE="$RUNNER_TEMP/incs.txt"
+          { find techpack drivers/usb -name '*.h' -printf '%h\n' 2>/dev/null
+            find drivers -type d \( -name inc -o -name include \) -printf '%h\n' 2>/dev/null
+          } | sort -u | sed "s|^|-I$(pwd)/|" > "$INC_FILE"
+          echo "注入 -I 目录数: $(wc -l < "$INC_FILE")"
+          # 自检：先确认 GCC 真能吃 @file，不能就退回（避免整轮白跑）
+          echo 'int main(void){return 0;}' > "$RUNNER_TEMP/_t.c"
+          if gcc "@$INC_FILE" -c "$RUNNER_TEMP/_t.c" -o "$RUNNER_TEMP/_t.o" 2>/dev/null; then
+            echo "[+] GCC @file 方式可用，命令行不会超限"
+            export KCFLAGS="$KC_BASE @$INC_FILE"
+          else
+            echo "[!] @file 不可用，退回直接拼接（只取 techpack 部分，控制在百条内）"
+            export KCFLAGS="$KC_BASE $(grep 'techpack' "$INC_FILE" | head -100 | tr '\n' ' ')"
+          fi
           export HOSTCFLAGS="-fcommon -Wno-error"
           export KCPPFLAGS="-fcommon"
           LOG="$RUNNER_TEMP/build.log"
