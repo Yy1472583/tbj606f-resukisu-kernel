@@ -131,6 +131,22 @@ jobs:
           grep -E "^CONFIG_KSU_MANUAL_HOOK_AUTO_(SETUID|INITRC|INPUT)_HOOK=" .config || true
           python3 "${{ github.workspace }}/configs/apply_manual_hook.py" .
 
+          # 根因修复：QTI RTIC 把 selinux_state 等变量塞进 .bss.rtic 受保护段，
+          # 该段链接地址远离内核 .text，导致 adrp 重定位溢出
+          # (relocation truncated to fit: R_AARCH64_ADR_PREL_PG_HI21 against .bss.rtic)。
+          # 自定义内核不需要 RTIC 反篡改保护，将 __rticdata 属性宏置空即可，
+          # 所有 "xxx __rticdata;" 预处理时展开为空 -> 变量回归普通 .bss。
+          echo "=== 禁用 RTIC __rticdata 段属性（修 vmlinux 链接 relocation truncated）==="
+          RTIC_DEF=$(grep -rl "^#define __rticdata" --include="*.h" --include="*.c" . 2>/dev/null | head -n1)
+          if [ -n "$RTIC_DEF" ]; then
+            echo "    找到宏定义: $RTIC_DEF"
+            sed -i 's|^#define __rticdata .*|#define __rticdata|' "$RTIC_DEF"
+            echo "    [+] __rticdata 已置空，所有 rtic 变量回归普通段"
+          else
+            echo "    [warn] 未找到 __rticdata 宏定义，回退：直接清理 hooks.c 使用处"
+            sed -i 's/struct selinux_state selinux_state __rticdata;/struct selinux_state selinux_state;/' security/selinux/hooks.c
+          fi
+
       - name: 编译内核（完整日志 + 修 -fno-common）
         run: |
           cd kernel
